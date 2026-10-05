@@ -11307,7 +11307,7 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                     let mut diagnostic = match value_type {
                         Type::ModuleLiteral(module) => builder.into_diagnostic(format_args!(
                             "Module `{module_name}` has no member `{attr_name}`",
-                            module_name = module.module(db).name(db),
+                            module_name = module.module(db).display_name(db),
                         )),
                         Type::ClassLiteral(class) => builder.into_diagnostic(format_args!(
                             "Class `{}` has no attribute `{attr_name}`",

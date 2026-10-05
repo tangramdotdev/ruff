@@ -53,9 +53,9 @@ use ruff_python_ast::{
     visitor::{Visitor, walk_body},
 };
 
-use crate::db::Db;
+use crate::db::{Db, ModuleResolution};
 use crate::module::{Module, ModuleKind};
-use crate::module_name::{ImportingFile, ModuleName};
+use crate::module_name::{ImportingFile, ModuleName, ModuleNameResolutionError};
 use crate::path::{ModuleDirectory, ModulePath, SearchPath, SystemOrVendoredPathRef};
 use crate::strategy::MisconfigurationStrategy;
 use crate::typeshed::{TypeshedVersions, vendored_typeshed_versions};
@@ -70,16 +70,92 @@ pub fn resolve_module<'db>(
     importing_file: ImportingFile<'db>,
     module_name: &ModuleName,
 ) -> Option<Module<'db>> {
-    let resolver_environment = importing_file.resolver_environment(db);
-    let interned_name = ModuleNameIngredient::new(
+    resolve_import(
         db,
-        module_name,
+        importing_file,
+        Some(module_name),
+        0,
         ModuleResolveMode::Typing,
-        resolver_environment,
-    );
+    )
+    .ok()
+    .flatten()
+}
 
-    resolve_module_query(db, interned_name)
-        .or_else(|| desperately_resolve_module(db, importing_file.file(db), interned_name))
+/// Resolves an import without erasing its relative level before consulting the host.
+/// Host overrides run outside the name-only cache so referrer-specific results cannot leak.
+pub fn resolve_import<'db>(
+    db: &'db dyn Db,
+    importing_file: ImportingFile<'db>,
+    name: Option<&ModuleName>,
+    level: u32,
+    mode: ModuleResolveMode,
+) -> Result<Option<Module<'db>>, ModuleNameResolutionError> {
+    if level == 0 && name.is_none() {
+        return Err(ModuleNameResolutionError::InvalidSyntax);
+    }
+    // Intrinsic lookups use resolve_module_confident, which has no importing file.
+    // Explicit imports always consult the host, including names such as `sys`.
+    match db.resolve_module(importing_file, name, level, mode) {
+        ModuleResolution::Resolved(module) => return Ok(Some(module)),
+        ModuleResolution::NotFound => return Ok(None),
+        ModuleResolution::Fallback => {}
+    }
+    if level == 0 {
+        let name = name.ok_or(ModuleNameResolutionError::InvalidSyntax)?;
+        return Ok(resolve_module_default(db, importing_file, name, mode));
+    }
+    let name =
+        ModuleName::from_identifier_parts(db, importing_file, name.map(ModuleName::as_str), level)?;
+    Ok(resolve_module_default(db, importing_file, &name, mode))
+}
+
+fn resolve_module_default<'db>(
+    db: &'db dyn Db,
+    importing_file: ImportingFile<'db>,
+    name: &ModuleName,
+    mode: ModuleResolveMode,
+) -> Option<Module<'db>> {
+    let name = ModuleNameIngredient::new(db, name, mode, importing_file.resolver_environment(db));
+    resolve_module_query(db, name)
+        .or_else(|| desperately_resolve_module(db, importing_file.file(db), name))
+}
+
+/// Resolves a child of a canonical package. Exported-attribute lookup remains the caller's job.
+pub fn resolve_submodule<'db>(
+    db: &'db dyn Db,
+    importing_file: ImportingFile<'db>,
+    parent: Module<'db>,
+    name: &ModuleName,
+    mode: ModuleResolveMode,
+) -> Option<Module<'db>> {
+    if !parent.kind(db).is_package() {
+        return None;
+    }
+    match db.resolve_submodule(importing_file, parent, name, mode) {
+        ModuleResolution::Resolved(module) => return Some(module),
+        ModuleResolution::NotFound => return None,
+        ModuleResolution::Fallback => {}
+    }
+    // Host packages have no filesystem search path to fall back to.
+    if parent.file(db).is_some() && parent.search_path(db).is_none() {
+        return None;
+    }
+    let mut absolute = parent.name(db).clone();
+    absolute.extend(name);
+    resolve_module_default(db, importing_file, &absolute, mode)
+}
+
+/// Offers a from-import member to the host with its original spelling and existing export.
+pub fn resolve_import_member<'db>(
+    db: &'db dyn Db,
+    importing_file: ImportingFile<'db>,
+    parent: Module<'db>,
+    import: &ast::StmtImportFrom,
+    member: &str,
+    export: Option<Module<'db>>,
+    mode: ModuleResolveMode,
+) -> ModuleResolution<'db> {
+    db.resolve_import_member(importing_file, parent, import, member, export, mode)
 }
 
 /// Resolves the module referenced by a `from` import statement.
@@ -90,8 +166,19 @@ pub fn resolve_module_for_import_from<'db>(
     importing_file: ImportingFile<'db>,
     import: &ast::StmtImportFrom,
 ) -> Option<Module<'db>> {
-    let module_name = ModuleName::from_import_statement(db, importing_file, import).ok()?;
-    resolve_module(db, importing_file, &module_name)
+    let name = match import.module.as_deref() {
+        Some(name) => Some(ModuleName::new(name)?),
+        None => None,
+    };
+    resolve_import(
+        db,
+        importing_file,
+        name.as_ref(),
+        import.level,
+        ModuleResolveMode::Typing,
+    )
+    .ok()
+    .flatten()
 }
 
 /// Resolves a module name to a module, without desperate resolution available.
@@ -119,16 +206,15 @@ pub fn resolve_real_module<'db>(
     importing_file: ImportingFile<'db>,
     module_name: &ModuleName,
 ) -> Option<Module<'db>> {
-    let resolver_environment = importing_file.resolver_environment(db);
-    let interned_name = ModuleNameIngredient::new(
+    resolve_import(
         db,
-        module_name,
+        importing_file,
+        Some(module_name),
+        0,
         ModuleResolveMode::Runtime,
-        resolver_environment,
-    );
-
-    resolve_module_query(db, interned_name)
-        .or_else(|| desperately_resolve_module(db, importing_file.file(db), interned_name))
+    )
+    .ok()
+    .flatten()
 }
 
 /// Resolves a module name to a module, without desperate resolution available (stubs not allowed).
@@ -166,16 +252,15 @@ pub fn resolve_real_shadowable_module<'db>(
     importing_file: ImportingFile<'db>,
     module_name: &ModuleName,
 ) -> Option<Module<'db>> {
-    let resolver_environment = importing_file.resolver_environment(db);
-    let interned_name = ModuleNameIngredient::new(
+    resolve_import(
         db,
-        module_name,
+        importing_file,
+        Some(module_name),
+        0,
         ModuleResolveMode::RuntimeSomeShadowingAllowed,
-        resolver_environment,
-    );
-
-    resolve_module_query(db, interned_name)
-        .or_else(|| desperately_resolve_module(db, importing_file.file(db), interned_name))
+    )
+    .ok()
+    .flatten()
 }
 
 /// Selects typing or runtime module-resolution semantics.
@@ -353,6 +438,11 @@ pub fn file_to_module<'db>(
     db: &'db dyn Db,
     resolver_file: ResolverFile<'db>,
 ) -> Option<Module<'db>> {
+    match db.file_to_module(resolver_file) {
+        ModuleResolution::Resolved(module) => return Some(module),
+        ModuleResolution::NotFound => return None,
+        ModuleResolution::Fallback => {}
+    }
     let resolver_environment = resolver_file.environment(db);
     let file = resolver_file.file(db);
     let _span = tracing::trace_span!("file_to_module", ?file).entered();

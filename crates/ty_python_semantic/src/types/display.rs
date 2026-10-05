@@ -904,8 +904,7 @@ pub(super) fn qualified_name_components_from_scope(
     }
 
     if let Some(module) = file_to_module(db, file.resolver_file(db)) {
-        let module_name = module.name(db);
-        name_parts.push(module_name.as_str().to_string());
+        name_parts.push(module.display_name(db).into_owned());
     }
 
     name_parts.reverse();
@@ -1297,7 +1296,8 @@ impl<'db> FmtDetailed<'db> for DisplayRepresentation<'_, 'db> {
                 f.with_type(KnownClass::ModuleType.to_class_literal(db, self.env))
                     .write_str("module")?;
                 f.write_str(" '")?;
-                f.with_type(self.ty).write_str(module.module(db).name(db))?;
+                f.with_type(self.ty)
+                    .write_str(&module.module(db).display_name(db))?;
                 f.write_str("'>")
             }
             Type::ClassLiteral(class) => {

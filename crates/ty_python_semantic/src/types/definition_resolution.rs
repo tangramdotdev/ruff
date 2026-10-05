@@ -14,7 +14,9 @@ use ruff_python_ast as ast;
 use ruff_text_size::TextRange;
 use rustc_hash::FxHashSet;
 use ty_module_resolver::{
-    ImportingFile, ModuleName, resolve_module, resolve_module_for_import_from,
+    ImportingFile, Module, ModuleName, ModuleResolution, ModuleResolveMode, ResolverFile,
+    file_to_module, resolve_import_member, resolve_module, resolve_module_for_import_from,
+    resolve_submodule,
 };
 use ty_python_core::definition::{
     Definition, DefinitionCategory, DefinitionKind, NestedBindingExecution,
@@ -756,7 +758,9 @@ pub(crate) fn resolve_from_import_definitions<'db>(
             env,
             importing_file,
             symbol_name,
-            resolved_module.name(db),
+            resolved_module,
+            import_node,
+            None,
         ));
     };
 
@@ -790,10 +794,26 @@ pub(crate) fn resolve_from_import_definitions<'db>(
             env,
             importing_file,
             symbol_name,
-            resolved_module.name(db),
+            resolved_module,
+            import_node,
+            None,
         ))
     } else {
         resolved_definitions
+            .into_iter()
+            .filter_map(|definition| match definition {
+                ResolvedDefinition::Module(file) => resolve_from_import_submodule_definitions(
+                    db,
+                    env,
+                    importing_file,
+                    symbol_name,
+                    resolved_module,
+                    import_node,
+                    Some(file),
+                ),
+                _ => Some(definition),
+            })
+            .collect()
     }
 }
 
@@ -803,12 +823,35 @@ fn resolve_from_import_submodule_definitions<'db>(
     env: &ProgramEnvironment<'db>,
     importing_file: ImportingFile<'db>,
     symbol_name: &str,
-    module_name: &ModuleName,
+    parent: Module<'db>,
+    import_node: &ast::StmtImportFrom,
+    export: Option<ProgramFile<'db>>,
 ) -> Option<ResolvedDefinition<'db>> {
-    let submodule_name = ModuleName::new(symbol_name)?;
-    let mut full_submodule_name = module_name.clone();
-    full_submodule_name.extend(&submodule_name);
-    let module = resolve_module(db, importing_file, &full_submodule_name)?;
+    let export_module = export.and_then(|file| {
+        file_to_module(
+            db,
+            ResolverFile::new(db, file.file(db), env.resolver_environment(db)),
+        )
+    });
+    let module = match resolve_import_member(
+        db,
+        importing_file,
+        parent,
+        import_node,
+        symbol_name,
+        export_module,
+        ModuleResolveMode::Typing,
+    ) {
+        ModuleResolution::Resolved(module) => module,
+        ModuleResolution::NotFound => return None,
+        ModuleResolution::Fallback => {
+            if let Some(export) = export {
+                return Some(ResolvedDefinition::Module(export));
+            }
+            let name = ModuleName::new(symbol_name)?;
+            resolve_submodule(db, importing_file, parent, &name, ModuleResolveMode::Typing)?
+        }
+    };
     let file = ProgramFile::new(db, module.file(db)?, env.program(db));
 
     Some(ResolvedDefinition::Module(file))

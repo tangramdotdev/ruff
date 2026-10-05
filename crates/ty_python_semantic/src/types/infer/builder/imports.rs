@@ -1,8 +1,9 @@
 use ruff_python_ast as ast;
 use ruff_text_size::{Ranged, TextRange};
 use ty_module_resolver::{
-    ImportingFile, Module, ModuleName, ModuleNameResolutionError, ModuleResolveMode,
-    resolve_module, search_paths,
+    ImportingFile, Module, ModuleName, ModuleNameResolutionError, ModuleResolution,
+    ModuleResolveMode, resolve_import, resolve_import_member, resolve_module,
+    resolve_module_for_import_from, resolve_submodule, search_paths,
 };
 
 use crate::{
@@ -430,38 +431,28 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             self.file(),
             self.program_environment().resolver_environment(db),
         );
-        let module_name = ModuleName::from_import_statement(db, importing_file, import_from);
-
-        let module_name = match module_name {
-            Ok(module_name) => module_name,
-            Err(ModuleNameResolutionError::InvalidSyntax) => {
-                tracing::debug!("Failed to resolve import due to invalid syntax");
-                // Invalid syntax diagnostics are emitted elsewhere.
-                return None;
-            }
-            Err(ModuleNameResolutionError::TooManyDots) => {
-                tracing::debug!(
-                    "Relative module resolution `{}` failed: too many leading dots",
-                    format_import_from_module(*level, module),
-                );
-                self.report_unresolved_import(module_ref.range(), *level, module, None);
-                return None;
-            }
-            Err(ModuleNameResolutionError::UnknownCurrentModule) => {
-                tracing::debug!(
-                    "Relative module resolution `{}` failed: could not resolve file `{}` to a module \
-                    (try adjusting configured search paths?)",
-                    format_import_from_module(*level, module),
-                    self.file().path(db)
-                );
+        let name = module.and_then(ModuleName::new);
+        let resolved = resolve_import(
+            db,
+            importing_file,
+            name.as_ref(),
+            *level,
+            ModuleResolveMode::Typing,
+        );
+        let resolved = match resolved {
+            Ok(resolved) => resolved,
+            Err(ModuleNameResolutionError::InvalidSyntax) => return None,
+            Err(
+                ModuleNameResolutionError::TooManyDots
+                | ModuleNameResolutionError::UnknownCurrentModule,
+            ) => {
                 self.report_unresolved_import(module_ref.range(), *level, module, None);
                 return None;
             }
         };
-
-        let resolved = resolve_module(db, importing_file, &module_name);
         if resolved.is_none() {
-            self.report_unresolved_import(module_ref.range(), *level, module, Some(&module_name));
+            let absolute = ModuleName::from_import_statement(db, importing_file, import_from).ok();
+            self.report_unresolved_import(module_ref.range(), *level, module, absolute.as_ref());
         }
 
         resolved
@@ -479,29 +470,23 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             self.file(),
             self.program_environment().resolver_environment(db),
         );
-        let Ok(module_name) = ModuleName::from_import_statement(db, importing_file, import_from)
-        else {
-            self.add_binding(alias.into(), definition)
-                .insert(self, Type::unknown());
-            return;
-        };
-
-        if self
-            .settings()
-            .replace_imports_with_any
-            .matches(&module_name)
-            .is_include()
-        {
+        let module_name = ModuleName::from_import_statement(db, importing_file, import_from).ok();
+        if module_name.as_ref().is_some_and(|name| {
+            self.settings()
+                .replace_imports_with_any
+                .matches(name)
+                .is_include()
+        }) {
             self.add_binding(alias.into(), definition)
                 .insert(self, Type::any());
             return;
         }
-
-        let Some(module) = resolve_module(db, importing_file, &module_name) else {
+        let Some(module) = resolve_module_for_import_from(db, importing_file, import_from) else {
             self.add_binding(alias.into(), definition)
                 .insert(self, Type::unknown());
             return;
         };
+        let module_name = module_name.unwrap_or_else(|| module.name(db).clone());
 
         let module_literal = ModuleLiteralType::new(
             db,
@@ -558,13 +543,49 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
                         .report_lint(&POSSIBLY_MISSING_IMPORT, ast::AnyNodeRef::Alias(alias))
                     {
                         builder.into_diagnostic(format_args!(
-                            "Member `{name}` of module `{module_name}` may be missing",
+                            "Member `{name}` of module `{}` may be missing",
+                            module.display_name(db),
                         ));
                     }
                 }
                 if qualifiers.contains(TypeQualifiers::FROM_MODULE_GETATTR) {
                     from_module_getattr = Some((ty, qualifiers, source_provenance, error));
                 } else {
+                    // Hosts may record a different module edge on this importing file. Scalar
+                    // and callable exports still take precedence over sibling modules.
+                    let ty = if let Type::ModuleLiteral(export) = ty {
+                        match resolve_import_member(
+                            db,
+                            importing_file,
+                            module,
+                            import_from,
+                            name,
+                            Some(export.module(db)),
+                            ModuleResolveMode::Typing,
+                        ) {
+                            ModuleResolution::Resolved(child) => {
+                                Type::module_literal(db, self.program_file(), child)
+                            }
+                            ModuleResolution::Fallback => ty,
+                            ModuleResolution::NotFound => {
+                                let import_name = import_from.module.as_deref().map_or_else(
+                                    || name.to_string(),
+                                    |module| format!("{module}.{name}"),
+                                );
+                                self.report_unresolved_import(
+                                    alias.range(),
+                                    import_from.level,
+                                    Some(&import_name),
+                                    None,
+                                );
+                                self.add_binding(alias.into(), definition)
+                                    .insert(self, Type::unknown());
+                                return;
+                            }
+                        }
+                    } else {
+                        ty
+                    };
                     self.add_imported_binding(alias, definition, ty, qualifiers, source_provenance);
                     return;
                 }
@@ -595,9 +616,23 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         //
         // Regardless, for now, we sidestep all of that by repeating the submodule-or-attribute
         // check here when inferring types for a `from...import` statement.
-        if let Some(submodule_type) = full_submodule_name
-            .as_ref()
-            .and_then(|submodule_name| self.module_type_from_name(submodule_name))
+        let submodule = match resolve_import_member(
+            db,
+            importing_file,
+            module,
+            import_from,
+            name,
+            None,
+            ModuleResolveMode::Typing,
+        ) {
+            ModuleResolution::Resolved(child) => Some(child),
+            ModuleResolution::NotFound => None,
+            ModuleResolution::Fallback => ModuleName::new(name).and_then(|name| {
+                resolve_submodule(db, importing_file, module, &name, ModuleResolveMode::Typing)
+            }),
+        };
+        if let Some(submodule_type) =
+            submodule.map(|module| Type::module_literal(db, self.program_file(), module))
         {
             self.add_binding(alias.into(), definition)
                 .insert(self, submodule_type);
@@ -643,7 +678,8 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         };
 
         let mut diagnostic = builder.into_diagnostic(format_args!(
-            "Module `{module_name}` has no member `{name}`"
+            "Module `{}` has no member `{name}`",
+            module.display_name(db)
         ));
 
         let mut submodule_hint_added = false;
@@ -702,7 +738,10 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
             return;
         };
 
-        let Some(module) = resolve_module(db, importing_file, &thispackage_name) else {
+        let Some(module) = resolve_import(db, importing_file, None, 1, ModuleResolveMode::Typing)
+            .ok()
+            .flatten()
+        else {
             self.add_binding(import_from.into(), definition)
                 .insert(self, Type::unknown());
             return;
@@ -738,7 +777,15 @@ impl<'db, 'ast> TypeInferenceBuilder<'db, 'ast> {
         full_submodule_name.extend(&final_part);
 
         // Try to actually resolve the import `whatever.thispackage.x`
-        if let Some(submodule_type) = self.module_type_from_name(&full_submodule_name) {
+        if let Some(submodule_type) = resolve_submodule(
+            db,
+            importing_file,
+            module,
+            &final_part,
+            ModuleResolveMode::Typing,
+        )
+        .map(|module| Type::module_literal(db, self.program_file(), module))
+        {
             // Success, introduce a binding!
             //
             // We explicitly don't introduce a *declaration* because it's actual ok

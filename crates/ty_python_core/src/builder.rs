@@ -4103,7 +4103,16 @@ impl<'db, 'ast> SemanticIndexBuilder<'db, 'ast> {
                 let mut is_self_import = false;
                 let source_file = self.file.file(self.db);
                 let resolver_environment = self.resolver_environment;
-                if source_file.is_package(self.db)
+                if (source_file.is_package(self.db)
+                    || ty_module_resolver::file_to_module(
+                        self.db,
+                        ty_module_resolver::ResolverFile::new(
+                            self.db,
+                            source_file,
+                            resolver_environment,
+                        ),
+                    )
+                    .is_some_and(|module| module.kind(self.db).is_package()))
                     && let Ok(module_name) = ModuleName::from_identifier_parts(
                         self.db,
                         ImportingFile::File(source_file, resolver_environment),

@@ -183,9 +183,16 @@ impl<'db> SemanticModel<'db> {
             self.file(),
             self.program_environment().resolver_environment(self.db),
         );
-        let module_name =
-            ModuleName::from_identifier_parts(self.db, importing_file, module, level).ok()?;
-        resolve_module(self.db, importing_file, &module_name)
+        let name = module.and_then(ModuleName::new);
+        ty_module_resolver::resolve_import(
+            self.db,
+            importing_file,
+            name.as_ref(),
+            level,
+            ty_module_resolver::ModuleResolveMode::Typing,
+        )
+        .ok()
+        .flatten()
     }
 
     /// Returns completions for symbols available in a `import <CURSOR>` context.

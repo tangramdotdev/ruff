@@ -2473,7 +2473,7 @@ pub(super) fn report_bad_import_call<'db>(
             lint: &INVALID_MODULE_GETATTR_CALL,
             message: format!(
                 "Cannot import `{name}` from module `{}`",
-                module.module(db).name(db),
+                module.module(db).display_name(db),
             ),
             info: "This import implicitly calls a module-level `__getattr__` function",
             argument_ranges: &[target.range()],
@@ -3123,7 +3123,7 @@ pub(super) fn report_possibly_missing_attribute(
     match object_ty {
         Type::ModuleLiteral(module) => builder.into_diagnostic(format_args!(
             "Member `{attribute}` may be missing on module `{}`",
-            module.module(db).name(db),
+            module.module(db).display_name(db),
         )),
         Type::ClassLiteral(class) => builder.into_diagnostic(format_args!(
             "Attribute `{attribute}` may be missing on class `{}`",

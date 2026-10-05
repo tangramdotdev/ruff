@@ -1,5 +1,5 @@
 use compact_str::{CompactString, ToCompactString};
-use itertools::Itertools;
+use itertools::{Either, Itertools};
 use ruff_diagnostics::{Edit, Fix};
 use rustc_hash::{FxHashMap, FxHashSet};
 
@@ -12093,7 +12093,7 @@ impl<'db> InvalidTypeExpression<'db> {
                     InvalidTypeExpression::InvalidType(Type::ModuleLiteral(module), _) => write!(
                         f,
                         "Module `{module}` is not valid in a {location}",
-                        module = module.module(db).name(db)
+                        module = module.module(db).display_name(db)
                     ),
                     InvalidTypeExpression::InvalidType(ty, _) => write!(
                         f,
@@ -12392,25 +12392,47 @@ impl<'db> ModuleLiteralType<'db> {
     /// We instead prefer handling most other import effects as definitions in the scope of
     /// the current file (i.e. `ty_python_core::definition::ImportFromDefinitionNodeRef`).
     fn available_submodule_attributes(&self, db: &'db dyn Db) -> impl Iterator<Item = Name> {
-        self.importing_file(db)
-            .into_iter()
-            .flat_map(|file| semantic_index(db, file).imported_modules())
-            .filter_map(|submodule_name| submodule_name.relative_to(self.module(db).name(db)))
-            .filter_map(|relative_submodule| relative_submodule.components().next().map(Name::from))
+        let parent = self.module(db);
+        if parent.search_path(db).is_some() {
+            return Either::Left(
+                self.importing_file(db)
+                    .into_iter()
+                    .flat_map(|file| semantic_index(db, file).imported_modules())
+                    .filter_map(move |name| name.relative_to(parent.name(db)))
+                    .filter_map(|name| name.components().next().map(Name::from)),
+            );
+        }
+        // A host module's canonical name can differ from every alias used to import it.
+        Either::Right(self.importing_file(db).into_iter().flat_map(move |file| {
+            let importer = ImportingFile::File(file.file(db), file.resolver_environment(db));
+            semantic_index(db, file)
+                .imported_modules()
+                .flat_map(move |name| {
+                    name.ancestors().skip(1).filter_map(move |prefix| {
+                        if resolve_module(db, importer, &prefix) != Some(parent) {
+                            return None;
+                        }
+                        name.relative_to(&prefix)?
+                            .components()
+                            .next()
+                            .map(Name::from)
+                    })
+                })
+        }))
     }
 
     fn resolve_submodule(self, db: &'db dyn Db, name: &str) -> Option<Type<'db>> {
         let importing_file = self.importing_file(db)?;
-        let relative_submodule_name = ModuleName::new(name)?;
-        let mut absolute_submodule_name = self.module(db).name(db).clone();
-        absolute_submodule_name.extend(&relative_submodule_name);
-        let submodule = resolve_module(
+        let name = ModuleName::new(name)?;
+        let submodule = ty_module_resolver::resolve_submodule(
             db,
             ImportingFile::File(
                 importing_file.file(db),
                 importing_file.resolver_environment(db),
             ),
-            &absolute_submodule_name,
+            self.module(db),
+            &name,
+            ty_module_resolver::ModuleResolveMode::Typing,
         )?;
         Some(Type::module_literal(db, importing_file, submodule))
     }

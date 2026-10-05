@@ -38,14 +38,36 @@ impl<'db> Module<'db> {
             db,
             name,
             kind,
-            search_path,
+            Some(search_path),
             file,
             resolver_environment,
             known,
         ))
     }
 
-    pub(crate) fn namespace_package(
+    /// Creates a canonical module supplied by an embedding host.
+    /// Use the same file and name for aliases of one module; distinct module contexts need
+    /// distinct file identities. Source contents are supplied through `ruff_db::System`.
+    pub fn new(
+        db: &'db dyn Db,
+        file: File,
+        resolver_environment: ResolverEnvironment<'db>,
+        name: ModuleName,
+        kind: ModuleKind,
+    ) -> Self {
+        Self::File(FileModule::new(
+            db,
+            name,
+            kind,
+            None,
+            file,
+            resolver_environment,
+            None,
+        ))
+    }
+
+    /// Creates a namespace package. Its canonical name must be unique within the environment.
+    pub fn namespace_package(
         db: &'db dyn Db,
         resolver_environment: ResolverEnvironment<'db>,
         name: Cow<'_, ModuleName>,
@@ -54,7 +76,7 @@ impl<'db> Module<'db> {
     }
 
     /// The resolver environment used to resolve this module.
-    pub(crate) fn resolver_environment(self, db: &'db dyn Database) -> ResolverEnvironment<'db> {
+    pub fn resolver_environment(self, db: &'db dyn Database) -> ResolverEnvironment<'db> {
         match self {
             Module::File(module) => module.resolver_environment(db),
             Module::Namespace(module) => module.resolver_environment(db),
@@ -67,6 +89,12 @@ impl<'db> Module<'db> {
             Module::File(module) => module.name(db),
             Module::Namespace(ref package) => package.name(db),
         }
+    }
+
+    /// The label used in diagnostics, independent of the canonical import name.
+    pub fn display_name(self, db: &'db dyn Db) -> Cow<'db, str> {
+        db.module_display_name(self)
+            .unwrap_or_else(|| Cow::Borrowed(self.name(db).as_str()))
     }
 
     /// The file to the source code that defines this module
@@ -99,11 +127,10 @@ impl<'db> Module<'db> {
 
     /// The search path from which the module was resolved.
     ///
-    /// It is guaranteed that if `None` is returned, then this is a namespace
-    /// package. Otherwise, this is a regular package or file module.
+    /// Host-provided modules and namespace packages have no filesystem search path.
     pub fn search_path(self, db: &'db dyn Database) -> Option<&'db SearchPath> {
         match self {
-            Module::File(module) => Some(module.search_path(db)),
+            Module::File(module) => module.search_path(db).as_ref(),
             Module::Namespace(_) => None,
         }
     }
@@ -173,7 +200,7 @@ pub struct FileModule<'db> {
     #[returns(copy)]
     pub(super) kind: ModuleKind,
     #[returns(ref)]
-    pub(super) search_path: SearchPath,
+    pub(super) search_path: Option<SearchPath>,
     #[returns(copy)]
     pub(super) file: File,
     #[returns(copy)]
