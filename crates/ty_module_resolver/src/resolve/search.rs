@@ -75,6 +75,9 @@ pub(crate) fn list_root_modules<'db>(
 /// Lists immediate submodules of a resolved module.
 #[salsa::tracked(returns(ref), heap_size=ruff_memory_usage::heap_size)]
 pub(crate) fn list_submodules<'db>(db: &'db dyn Db, module: Module<'db>) -> ModuleListing<'db> {
+    if module.file(db).is_some() && module.search_path(db).is_none() {
+        return ModuleListing::default();
+    }
     let resolver_environment = module.resolver_environment(db);
     let context = ResolverContext::new(db, resolver_environment, ModuleResolveMode::Typing);
 
