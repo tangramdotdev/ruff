@@ -387,7 +387,10 @@ impl std::fmt::Debug for ModuleDebugSnapshot<'_> {
                     f,
                     "Module::File({name:?}, {search_path:?}, {path:?}, {kind:?}, {known:?})",
                     name = module.name(self.db).as_str(),
-                    search_path = module.search_path(self.db).debug_kind(),
+                    search_path = module
+                        .search_path(self.db)
+                        .as_ref()
+                        .map_or("host", |path| path.debug_kind()),
                     path = nice_path,
                     kind = module.kind(self.db),
                     known = module.known(self.db),

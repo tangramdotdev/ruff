@@ -4,16 +4,17 @@ use std::iter::FusedIterator;
 use ruff_db::system::SystemPath;
 use rustc_hash::FxHasher;
 
-pub use db::Db;
+pub use db::{Db, ModuleResolution};
 pub use environment::{ResolverEnvironment, ResolverFile};
 pub use module::KnownModule;
-pub use module::Module;
+pub use module::{Module, ModuleKind};
 pub use module_name::{ImportingFile, ModuleName, ModuleNameResolutionError};
 pub use path::{SearchPath, SearchPathError};
 pub use resolve::{
-    SearchPaths, editable_search_paths, file_to_module, resolve_module, resolve_module_confident,
-    resolve_module_for_import_from, resolve_real_module, resolve_real_module_confident,
-    resolve_real_shadowable_module, stub_file_to_real_module,
+    SearchPaths, editable_search_paths, file_to_module, resolve_import, resolve_import_member,
+    resolve_module, resolve_module_confident, resolve_module_for_import_from, resolve_real_module,
+    resolve_real_module_confident, resolve_real_shadowable_module, resolve_submodule,
+    stub_file_to_real_module,
 };
 pub use settings::{SearchPathSettings, SearchPathSettingsError};
 pub use strategy::{FallibleStrategy, MisconfigurationStrategy, UseDefaultStrategy};
@@ -23,6 +24,8 @@ pub use list::{all_modules, list_modules};
 pub use module_glob::{ModuleGlobError, ModuleGlobSet, ModuleGlobSetBuilder, ModuleNameMatch};
 pub use resolve::{ModuleResolveMode, SearchPathIterator, search_paths};
 
+#[cfg(test)]
+mod custom;
 mod db;
 mod environment;
 mod list;
