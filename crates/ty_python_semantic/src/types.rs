@@ -144,6 +144,7 @@ mod context;
 mod context_manager;
 mod cyclic;
 mod dedicated;
+pub mod describe;
 mod diagnostic;
 mod dict;
 mod display;
