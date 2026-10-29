@@ -84,6 +84,8 @@ pub struct TypedDict<'db> {
     pub file: Option<File>,
     /// The fields, in order of their names.
     pub fields: Vec<Field<'db>>,
+    /// Whether the typed dict is closed, so that it has no items other than its fields.
+    pub closed: bool,
 }
 
 /// A field of a typed dict.
@@ -190,7 +192,13 @@ pub fn describe<'db>(
                     ty: field.declared_ty,
                 })
                 .collect();
-            Description::TypedDict(TypedDict { name, file, fields })
+            let closed = typed_dict.openness(db).is_closed();
+            Description::TypedDict(TypedDict {
+                name,
+                file,
+                fields,
+                closed,
+            })
         }
         Type::FunctionLiteral(function) => {
             let signature = function.signature_with_inferred_return_type(db);
