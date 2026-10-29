@@ -46,6 +46,8 @@ pub enum Description<'db> {
     Union(Vec<Type<'db>>),
     /// A callable with one signature for each of its overloads.
     Callable(Vec<Signature<'db>>),
+    /// A class, with the type of its instances.
+    Class(Type<'db>),
     /// Any other type.
     Other,
 }
@@ -197,6 +199,12 @@ pub fn describe<'db>(
         Type::Callable(callable) => {
             let signatures = callable.signatures(db);
             Description::Callable(signatures.iter().map(signature_description).collect())
+        }
+        Type::ClassLiteral(_) | Type::GenericAlias(_) => {
+            match ty.to_instance_approximation(db, env) {
+                Some(instance) => Description::Class(instance),
+                None => Description::Other,
+            }
         }
         _ => Description::Other,
     }
